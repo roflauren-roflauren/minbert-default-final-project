@@ -72,7 +72,7 @@ class MultitaskBERT(nn.Module):
         
         ### TODO
         # currently returns embedding straight from BERT:
-        return self.bert(input_ids, attention_mask)['last_hidden_state']
+        return self.bert(input_ids, attention_mask)['pooler_output']
 
 
     def predict_sentiment(self, input_ids, attention_mask):
