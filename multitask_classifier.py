@@ -41,7 +41,7 @@ class MultitaskBERT(nn.Module):
     - Paraphrase detection (predict_paraphrase)
     - Semantic Textual Similarity (predict_similarity)
     '''
-    def __init__(self, config):
+    def __init__(self, config):        
         super(MultitaskBERT, self).__init__()
         # You will want to add layers here to perform the downstream tasks.
         # Pretrain mode does not require updating bert paramters.
@@ -51,9 +51,17 @@ class MultitaskBERT(nn.Module):
                 param.requires_grad = False
             elif config.option == 'finetune':
                 param.requires_grad = True
+         
         ### TODO
-        raise NotImplementedError
+        # baseline: specific dropout + linear layers for each task:  
+        self.stm_dropout = torch.nn.Dropout(config.hidden_dropout_prob)
+        self.stm_linear  = torch.nn.Linear(config.hidden_size, len(config.num_labels))
 
+        self.ppr_dropout = torch.nn.Dropout(config.hidden_dropout_prob)
+        self.ppr_linear  = torch.nn.Linear(config.hidden_size, 1)
+        
+        self.sim_dropout = torch.nn.Dropout(config.hidden_dropout_prob)
+        self.sim_linear  = torch.nn.Linear(config.hidden_size, 1)
 
     def forward(self, input_ids, attention_mask):
         'Takes a batch of sentences and produces embeddings for them.'
@@ -61,8 +69,10 @@ class MultitaskBERT(nn.Module):
         # Here, you can start by just returning the embeddings straight from BERT.
         # When thinking of improvements, you can later try modifying this
         # (e.g., by adding other layers).
+        
         ### TODO
-        raise NotImplementedError
+        # currently returns embedding straight from BERT:
+        return self.bert(input_ids, attention_mask)['last_hidden_state']
 
 
     def predict_sentiment(self, input_ids, attention_mask):
@@ -71,8 +81,11 @@ class MultitaskBERT(nn.Module):
         (0 - negative, 1- somewhat negative, 2- neutral, 3- somewhat positive, 4- positive)
         Thus, your output should contain 5 logits for each sentence.
         '''
+        
         ### TODO
-        raise NotImplementedError
+        pooled = self.bert(input_ids, attention_mask)['pooler_output']
+        logits = self.stm_linear(self.stm_dropout(pooled))
+        return F.log_softmax(logits, dim=1)
 
 
     def predict_paraphrase(self,
@@ -82,8 +95,12 @@ class MultitaskBERT(nn.Module):
         Note that your output should be unnormalized (a logit); it will be passed to the sigmoid function
         during evaluation, and handled as a logit by the appropriate loss function.
         '''
+        
         ### TODO
-        raise NotImplementedError
+        pooled1, pooled2 = self.bert(input_ids_1, attention_mask_1)['pooler_output'], \
+            self.bert(input_ids_2, attention_mask_2)['pooler_output']
+        logit = self.ppr_linear(self.ppr_dropout(pooled1 + pooled2))
+        return logit
 
 
     def predict_similarity(self,
@@ -93,10 +110,12 @@ class MultitaskBERT(nn.Module):
         Note that your output should be unnormalized (a logit); it will be passed to the sigmoid function
         during evaluation, and handled as a logit by the appropriate loss function.
         '''
+        
         ### TODO
-        raise NotImplementedError
-
-
+        pooled1, pooled2 = self.bert(input_ids_1, attention_mask_1)['pooler_output'], \
+            self.bert(input_ids_2, attention_mask_2)['pooler_output']
+        logit = self.sim_linear(self.sim_dropout(pooled1 + pooled2))
+        return logit
 
 
 def save_model(model, optimizer, args, config, filepath):
@@ -119,15 +138,15 @@ def train_multitask(args):
     device = torch.device('cuda') if args.use_gpu else torch.device('cpu')
     # Load data
     # Create the data and its corresponding datasets and dataloader
-    sst_train_data, num_labels,para_train_data, sts_train_data = load_multitask_data(args.sst_train,args.para_train,args.sts_train, split ='train')
-    sst_dev_data, num_labels,para_dev_data, sts_dev_data = load_multitask_data(args.sst_dev,args.para_dev,args.sts_dev, split ='train')
+    sst_train_data, num_labels, para_train_data, sts_train_data = load_multitask_data(args.sst_train, args.para_train, args.sts_train, split ='train')
+    sst_dev_data, num_labels, para_dev_data, sts_dev_data       = load_multitask_data(args.sst_dev,   args.para_dev,   args.sts_dev,   split ='train')
 
     sst_train_data = SentenceClassificationDataset(sst_train_data, args)
-    sst_dev_data = SentenceClassificationDataset(sst_dev_data, args)
+    sst_dev_data   = SentenceClassificationDataset(sst_dev_data, args)
 
     sst_train_dataloader = DataLoader(sst_train_data, shuffle=True, batch_size=args.batch_size,
                                       collate_fn=sst_train_data.collate_fn)
-    sst_dev_dataloader = DataLoader(sst_dev_data, shuffle=False, batch_size=args.batch_size,
+    sst_dev_dataloader   = DataLoader(sst_dev_data, shuffle=False, batch_size=args.batch_size,
                                     collate_fn=sst_dev_data.collate_fn)
 
     # Init model
@@ -172,14 +191,13 @@ def train_multitask(args):
         train_loss = train_loss / (num_batches)
 
         train_acc, train_f1, *_ = model_eval_sst(sst_train_dataloader, model, device)
-        dev_acc, dev_f1, *_ = model_eval_sst(sst_dev_dataloader, model, device)
+        dev_acc, dev_f1, *_     = model_eval_sst(sst_dev_dataloader, model, device)
 
         if dev_acc > best_dev_acc:
             best_dev_acc = dev_acc
             save_model(model, optimizer, args, config, args.filepath)
 
         print(f"Epoch {epoch}: train loss :: {train_loss :.3f}, train acc :: {train_acc :.3f}, dev acc :: {dev_acc :.3f}")
-
 
 
 def test_model(args):
@@ -199,32 +217,32 @@ def test_model(args):
 def get_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--sst_train", type=str, default="data/ids-sst-train.csv")
-    parser.add_argument("--sst_dev", type=str, default="data/ids-sst-dev.csv")
-    parser.add_argument("--sst_test", type=str, default="data/ids-sst-test-student.csv")
+    parser.add_argument("--sst_dev",   type=str, default="data/ids-sst-dev.csv")
+    parser.add_argument("--sst_test",  type=str, default="data/ids-sst-test-student.csv")
 
     parser.add_argument("--para_train", type=str, default="data/quora-train.csv")
-    parser.add_argument("--para_dev", type=str, default="data/quora-dev.csv")
-    parser.add_argument("--para_test", type=str, default="data/quora-test-student.csv")
+    parser.add_argument("--para_dev",   type=str, default="data/quora-dev.csv")
+    parser.add_argument("--para_test",   type=str, default="data/quora-test-student.csv")
 
     parser.add_argument("--sts_train", type=str, default="data/sts-train.csv")
-    parser.add_argument("--sts_dev", type=str, default="data/sts-dev.csv")
-    parser.add_argument("--sts_test", type=str, default="data/sts-test-student.csv")
+    parser.add_argument("--sts_dev",   type=str, default="data/sts-dev.csv")
+    parser.add_argument("--sts_test",  type=str, default="data/sts-test-student.csv")
 
-    parser.add_argument("--seed", type=int, default=11711)
+    parser.add_argument("--seed",   type=int, default=11711)
     parser.add_argument("--epochs", type=int, default=10)
     parser.add_argument("--option", type=str,
                         help='pretrain: the BERT parameters are frozen; finetune: BERT parameters are updated',
                         choices=('pretrain', 'finetune'), default="pretrain")
     parser.add_argument("--use_gpu", action='store_true')
 
-    parser.add_argument("--sst_dev_out", type=str, default="predictions/sst-dev-output.csv")
-    parser.add_argument("--sst_test_out", type=str, default="predictions/sst-test-output.csv")
+    parser.add_argument("--sst_dev_out",  type=str, default="predictions_multitask/sst-dev-output.csv")
+    parser.add_argument("--sst_test_out", type=str, default="predictions_multitask/sst-test-output.csv")
 
-    parser.add_argument("--para_dev_out", type=str, default="predictions/para-dev-output.csv")
-    parser.add_argument("--para_test_out", type=str, default="predictions/para-test-output.csv")
+    parser.add_argument("--para_dev_out",  type=str, default="predictions_multitask/para-dev-output.csv")
+    parser.add_argument("--para_test_out", type=str, default="predictions_multitask/para-test-output.csv")
 
-    parser.add_argument("--sts_dev_out", type=str, default="predictions/sts-dev-output.csv")
-    parser.add_argument("--sts_test_out", type=str, default="predictions/sts-test-output.csv")
+    parser.add_argument("--sts_dev_out",  type=str, default="predictions_multitask/sts-dev-output.csv")
+    parser.add_argument("--sts_test_out", type=str, default="predictions_multitask/sts-test-output.csv")
 
     # hyper parameters
     parser.add_argument("--batch_size", help='sst: 64, cfimdb: 8 can fit a 12GB GPU', type=int, default=8)

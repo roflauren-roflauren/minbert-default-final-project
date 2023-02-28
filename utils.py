@@ -8,6 +8,7 @@ from tqdm.auto import tqdm
 from functools import partial
 from urllib.parse import urlparse
 from pathlib import Path
+import fnmatch
 import requests
 from hashlib import sha256
 from filelock import FileLock

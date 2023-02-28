@@ -47,8 +47,18 @@ class BertSelfAttention(nn.Module):
     # next, we need to concat multi-heads and recover the original shape [bs, seq_len, num_attention_heads * attention_head_size = hidden_size]
 
     ### TODO
-    raise NotImplementedError
-
+    # compute the score matrix:
+    s = torch.matmul(query, key.transpose(-1, -2)) / math.sqrt(self.attention_head_size)
+    # mask out padding tokens: 
+    masked_s = s + attention_mask
+    # normalize scores:
+    normed_s = self.dropout(F.softmax(masked_s, dim=-1))
+    # recover V':
+    v = torch.matmul(normed_s, value)
+    # concat multi-heads:
+    bs, num_attention_heads, seq_len, attention_head_size = v.size()
+    v = v.permute(0, 2, 1, 3).contiguous().view(bs, seq_len, num_attention_heads * attention_head_size)
+    return v
 
   def forward(self, hidden_states, attention_mask):
     """
@@ -92,10 +102,16 @@ class BertLayer(nn.Module):
     dropout: the dropout to be applied 
     ln_layer: the layer norm to be applied
     """
-    # Hint: Remember that BERT applies to the output of each sub-layer, before it is added to the sub-layer input and normalized 
+    # Hint: Remember that BERT applies dropout to the output of each sub-layer, before it is added to the sub-layer input and normalized 
+    
     ### TODO
-    raise NotImplementedError
-
+    # transform output: 
+    d_output = dense_layer(output)
+    # apply dropout to dense output: 
+    drop_out = dropout(d_output)
+    # apply the add-norm operation: 
+    ret = ln_layer(input + drop_out)
+    return ret
 
   def forward(self, hidden_states, attention_mask):
     """
@@ -107,9 +123,17 @@ class BertLayer(nn.Module):
     3. a feed forward layer
     4. a add-norm that takes the input and output of the feed forward layer
     """
+    
     ### TODO
-    raise NotImplementedError
-
+    # multi-headed attention: 
+    attn_out = self.self_attention(hidden_states, attention_mask)
+    # add-norm: 
+    an_attn_out = self.add_norm(hidden_states, attn_out, self.attention_dense, self.attention_dropout, self.attention_layer_norm)
+    # feed-forward layer: 
+    interm_out = self.interm_af(self.interm_dense(an_attn_out))
+    # add-norm: 
+    final_out = self.add_norm(an_attn_out, interm_out, self.out_dense, self.out_dropout, self.out_layer_norm)
+    return final_out
 
 
 class BertModel(BertPreTrainedModel):
@@ -148,27 +172,20 @@ class BertModel(BertPreTrainedModel):
     seq_length = input_shape[1]
 
     # Get word embedding from self.word_embedding into input_embeds.
-    inputs_embeds = None
-    ### TODO
-    raise NotImplementedError
-
+    input_embeds = self.word_embedding(input_ids)
 
     # Get position index and position embedding from self.pos_embedding into pos_embeds.
     pos_ids = self.position_ids[:, :seq_length]
-
-    pos_embeds = None
-    ### TODO
-    raise NotImplementedError
-
+    pos_embeds = self.pos_embedding(pos_ids)
 
     # Get token type ids, since we are not consider token type, just a placeholder.
     tk_type_ids = torch.zeros(input_shape, dtype=torch.long, device=input_ids.device)
     tk_type_embeds = self.tk_type_embedding(tk_type_ids)
 
     # Add three embeddings together; then apply embed_layer_norm and dropout and return.
-    ### TODO
-    raise NotImplementedError
-
+    sum_embeds = input_embeds + pos_embeds + tk_type_embeds
+    ret = self.embed_dropout(self.embed_layer_norm(sum_embeds))
+    return ret
 
   def encode(self, hidden_states, attention_mask):
     """

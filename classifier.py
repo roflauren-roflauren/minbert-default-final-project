@@ -45,17 +45,19 @@ class BertSentimentClassifier(torch.nn.Module):
                 param.requires_grad = True
 
         ### TODO
-        raise NotImplementedError
-
+        self.dropout = torch.nn.Dropout(config.hidden_dropout_prob)
+        self.linear  = torch.nn.Linear(config.hidden_size, config.num_labels)
 
     def forward(self, input_ids, attention_mask):
         '''Takes a batch of sentences and returns logits for sentiment classes'''
         # The final BERT contextualized embedding is the hidden state of [CLS] token (the first token).
         # HINT: you should consider what is the appropriate output to return given that
         # the training loop currently uses F.cross_entropy as the loss function.
+        
         ### TODO
-        raise NotImplementedError
-
+        pooled = self.bert(input_ids, attention_mask)['pooler_output']
+        logits = self.linear(self.dropout(pooled))
+        return F.log_softmax(logits, dim=1)
 
 
 class SentimentDataset(Dataset):
@@ -136,13 +138,13 @@ def load_data(filename, flag='train'):
     num_labels = {}
     data = []
     if flag == 'test':
-        with open(filename, 'r') as fp:
+        with open(filename, 'r', encoding='utf-8') as fp:
             for record in csv.DictReader(fp,delimiter = '\t'):
                 sent = record['sentence'].lower().strip()
                 sent_id = record['id'].lower().strip()
                 data.append((sent,sent_id))
     else:
-        with open(filename, 'r') as fp:
+        with open(filename, 'r', encoding='utf-8') as fp:
             for record in csv.DictReader(fp,delimiter = '\t'):
                 sent = record['sentence'].lower().strip()
                 sent_id = record['id'].lower().strip()
@@ -348,7 +350,7 @@ def get_args():
 if __name__ == "__main__":
     args = get_args()
     seed_everything(args.seed)
-    #args.filepath = f'{args.option}-{args.epochs}-{args.lr}.pt'
+    args.filepath = f'{args.option}-{args.epochs}-{args.lr}.pt'
 
     print('Training Sentiment Classifier on SST...')
     config = SimpleNamespace(
@@ -377,7 +379,7 @@ if __name__ == "__main__":
         lr=args.lr,
         use_gpu=args.use_gpu,
         epochs=args.epochs,
-        batch_size=8,
+        batch_size=32,
         hidden_dropout_prob=args.hidden_dropout_prob,
         train='data/ids-cfimdb-train.csv',
         dev='data/ids-cfimdb-dev.csv',

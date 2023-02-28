@@ -41,10 +41,20 @@ class AdamW(Optimizer):
 
                 # State should be stored in this dictionary
                 state = self.state[p]
-
+                            
+                # initialize m, v, t:
+                if len(state) == 0: 
+                    state['step'] = 1
+                    state['m'] = 0
+                    state['v'] = 0
+                    
+                # retrieve m, v, t
+                m, v, t = state['m'], state['v'], state['step']
+                    
                 # Access hyperparameters from the `group` dictionary
-                alpha = group["lr"]
-
+                alpha, (beta1, beta2), eps, weight_decay = \
+                    group["lr"], group["betas"], group["eps"], group["weight_decay"]
+            
                 # Complete the implementation of AdamW here, reading and saving
                 # your state in the `state` dictionary above.
                 # The hyperparameters can be read from the `group` dictionary
@@ -59,7 +69,17 @@ class AdamW(Optimizer):
                 #    (incorporating the learning rate again).
 
                 ### TODO
-                raise NotImplementedError
-
-
+                # increment timestep:
+                state['step'] = t + 1
+                # update biased first, second moment estimates: 
+                m = beta1 * m + (1 - beta1) * grad 
+                v = beta2 * v + (1 - beta2) * (grad ** 2) 
+                state['m'], state['v'] = m, v
+                # compute alpha_t:               
+                alpha_t = alpha * math.sqrt(1 - (beta2 ** t)) / (1 - (beta1 ** t))
+                # incorporate learning rate into weight decay update:
+                p.data.add_(p.data, alpha = -weight_decay * alpha)
+                # update parameters:            
+                p.data.add_(m / (torch.sqrt(v) + eps), alpha = -alpha_t)
+        
         return loss
