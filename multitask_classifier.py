@@ -14,6 +14,9 @@ from datasets import SentenceClassificationDataset, SentencePairDataset, \
     load_multitask_data, load_multitask_test_data
 
 from evaluation import model_eval_sst, model_eval_multitask, test_model_multitask
+from ray import tune
+import ray
+
 
 
 TQDM_DISABLE=False
@@ -41,7 +44,7 @@ class MultitaskBERT(nn.Module):
     - Paraphrase detection (predict_paraphrase)
     - Semantic Textual Similarity (predict_similarity)
     '''
-    def __init__(self, config):        
+    def __init__(self, config, connected_info):        
         super(MultitaskBERT, self).__init__()
         # You will want to add layers here to perform the downstream tasks.
         # Pretrain mode does not require updating bert paramters.
@@ -64,9 +67,12 @@ class MultitaskBERT(nn.Module):
         self.sim_linear  = torch.nn.Linear(config.hidden_size, config.hidden_size)
 
         # sample extension parameter sharing regime: S - S - S 
-        self.share1 = torch.nn.Linear(config.hidden_size, config.hidden_size)
-        self.share2 = torch.nn.Linear(config.hidden_size, config.hidden_size)
-        self.share3 = torch.nn.Linear(config.hidden_size, config.hidden_size)
+        self.connected_info = connected_info
+        num_shared = sum([1 if x=='S' else 0 for x in connected_info])
+        num_individual = sum([3 if x=='I' else 0 for x in connected_info])
+        self.shared = nn.ParameterList([torch.nn.Linear(config.hidden_size, config.hidden_size) for i in range(num_shared)])
+        self.individual = nn.ParameterList([torch.nn.Linear(config.hidden_size, config.hidden_size) for i in range(num_individual)])
+
         
     def forward(self, input_ids, attention_mask):
         'Takes a batch of sentences and produces embeddings for them.'
@@ -91,8 +97,19 @@ class MultitaskBERT(nn.Module):
         pooled = self.bert(input_ids, attention_mask)['pooler_output']
         
         # apply the parameter sharing regime: 
-        pooled = self.share3(self.share2(self.share1(pooled)))
         
+        shared_index = 0
+        individual_index = 0
+        for val in self.connected_info:
+            if val == "S":
+                pooled = self.shared[shared_index](pooled)
+                pooled = nn.ReLU()(pooled)
+                shared_index += 1
+            if val == "I":
+                pooled = self.individual[individual_index](pooled)
+                pooled = nn.ReLU()(pooled)
+                individual_index += 3
+
         logits = self.stm_linear(self.stm_dropout(pooled))
         return F.log_softmax(logits, dim=1)
 
@@ -108,6 +125,22 @@ class MultitaskBERT(nn.Module):
         ### TODO
         pooled1, pooled2 = self.bert(input_ids_1, attention_mask_1)['pooler_output'], \
             self.bert(input_ids_2, attention_mask_2)['pooler_output']
+        shared_index = 0
+        individual_index = 1
+        print("number of individual layers: ", len(self.individual))
+        for val in self.connected_info:
+            if val == "S":
+                pooled1 = self.shared[shared_index](pooled1)
+                pooled1 = nn.ReLU()(pooled1)
+                pooled2 = self.shared[shared_index](pooled2)
+                pooled2 = nn.ReLU()(pooled2)
+                shared_index += 1
+            if val == "I":
+                pooled1 = self.individual[individual_index](pooled1)
+                pooled1 = nn.ReLU()(pooled1)
+                pooled2 = self.individual[individual_index](pooled2)
+                pooled2 = nn.ReLU()(pooled2)
+                individual_index += 3
         logit = self.ppr_linear(self.ppr_dropout(pooled1 + pooled2))
         return logit
 
@@ -123,6 +156,21 @@ class MultitaskBERT(nn.Module):
         pooled1, pooled2 = self.bert(input_ids_1, attention_mask_1)['pooler_output'], \
             self.bert(input_ids_2, attention_mask_2)['pooler_output']
         # transform pooled outputs: 
+        shared_index = 0
+        individual_index = 2
+        for val in self.connected_info:
+            if val == "S":
+                pooled1 = self.shared[shared_index](pooled1)
+                pooled1 = nn.ReLU()(pooled1)
+                pooled2 = self.shared[shared_index](pooled2)
+                pooled2 = nn.ReLU()(pooled2)
+                shared_index += 1
+            if val == "I":
+                pooled1 = self.individual[individual_index](pooled1)
+                pooled1 = nn.ReLU()(pooled1)
+                pooled2 = self.individual[individual_index](pooled2)
+                pooled2 = nn.ReLU()(pooled2)
+                individual_index += 3
         transform1, transform2 = self.sim_linear(self.sim_dropout(pooled1)), \
             self.sim_linear(self.sim_dropout(pooled2))
         # compute cosine similarity score:  
@@ -147,7 +195,8 @@ def save_model(model, optimizer, args, config, filepath):
 
 
 ## Currently only trains on sst dataset
-def train_multitask(args):
+def train_multitask(tune_config):
+    args = tune_config['args']
     device = torch.device('cuda') if args.use_gpu else torch.device('cpu')
     
     # Load data
@@ -182,14 +231,15 @@ def train_multitask(args):
 
     config = SimpleNamespace(**config)
 
-    model = MultitaskBERT(config)
+    model = MultitaskBERT(config, tune_config['connected'])
     model = model.to(device)
 
-    lr = args.lr
+    lr = tune_config['lr']
     optimizer = AdamW(model.parameters(), lr=lr)
     best_multitask_score = 0
         
     # run for the specified number of epochs: 
+    
     for epoch in range(args.epochs):
         model.train()
         train_loss = 0
@@ -199,17 +249,18 @@ def train_multitask(args):
         sst_dataiter, para_dataiter = iter(sst_train_dataloader), iter(para_train_dataloader)
         
         # iterate through dataloader with minimum number of batches (sts dataset): 
+        count = 0
         for batch in tqdm(sts_train_dataloader, desc=f'train-{epoch}', disable=TQDM_DISABLE):
             
             # compute loss for sst task: 
-            sst_batch = sst_dataiter.next()     
+            sst_batch = next(sst_dataiter)     
             b_ids, b_mask, b_labels = (sst_batch['token_ids'], sst_batch['attention_mask'], sst_batch['labels'])
             b_ids, b_mask, b_labels = b_ids.to(device), b_mask.to(device), b_labels.to(device)
             logits = model.predict_sentiment(b_ids, b_mask)
             sst_loss = F.cross_entropy(logits, b_labels.view(-1), reduction='sum') / args.batch_size            
             
             # compute loss for para tasK: 
-            para_batch = para_dataiter.next()
+            para_batch = next(para_dataiter)
             (b_ids1, b_mask1,
              b_ids2, b_mask2, 
              b_labels, b_sent_ids) = (para_batch['token_ids_1'], para_batch['attention_mask_1'],
@@ -254,7 +305,7 @@ def train_multitask(args):
             loss = (sst_loss + para_loss + sts_loss) / 3
             
             
-            loss = loss.type(torch.cuda.FloatTensor)
+            loss = loss.type(torch.FloatTensor)
 
             loss.backward()
             optimizer.step()
@@ -283,16 +334,17 @@ def train_multitask(args):
         print(f"Epoch {epoch}: train loss :: {train_loss :.3f}, train paraphrase acc :: {train_paraphrase_accuracy :.3f}, dev paraphrase acc :: {dev_paraphrase_accuracy :.3f}")
         print(f"train sentiment acc :: {train_sentiment_accuracy :.3f}, dev sentiment acc :: {dev_sentiment_accuracy :.3f}")
         print(f"train semantic similarity corr :: {train_sts_corr :.3f}, dev semantic similarity corr :: {dev_sts_corr :.3f}")
+    return {"score": multitask_score}
         
 
-def test_model(args):
+def test_model(args, tune_config):
     with torch.no_grad():
         device = torch.device('cuda') if args.use_gpu else torch.device('cpu')
         saved = torch.load(args.filepath)
         config = saved['model_config']
 
-        model = MultitaskBERT(config)
-        model.load_state_dict(saved['model'])
+        model = MultitaskBERT(config, tune_config)
+        model.load_state_dict(saved, strict=False)
         model = model.to(device)
         print(f"Loaded model to test from {args.filepath}")
 
@@ -301,17 +353,17 @@ def test_model(args):
 
 def get_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--sst_train", type=str, default="data/ids-sst-train.csv")
-    parser.add_argument("--sst_dev",   type=str, default="data/ids-sst-dev.csv")
-    parser.add_argument("--sst_test",  type=str, default="data/ids-sst-test-student.csv")
+    parser.add_argument("--sst_train", type=str, default="/Users/markbechthold/Desktop/School/Year 5/Winter/CS 224N/Final Project/minbert-default-final-project/data/ids-sst-train.csv")
+    parser.add_argument("--sst_dev",   type=str, default="/Users/markbechthold/Desktop/School/Year 5/Winter/CS 224N/Final Project/minbert-default-final-project/data/ids-sst-dev.csv")
+    parser.add_argument("--sst_test",  type=str, default="/Users/markbechthold/Desktop/School/Year 5/Winter/CS 224N/Final Project/minbert-default-final-project/data/ids-sst-test-student.csv")
 
-    parser.add_argument("--para_train", type=str, default="data/quora-train.csv")
-    parser.add_argument("--para_dev",   type=str, default="data/quora-dev.csv")
-    parser.add_argument("--para_test",   type=str, default="data/quora-test-student.csv")
+    parser.add_argument("--para_train", type=str, default="/Users/markbechthold/Desktop/School/Year 5/Winter/CS 224N/Final Project/minbert-default-final-project/data/quora-train.csv")
+    parser.add_argument("--para_dev",   type=str, default="/Users/markbechthold/Desktop/School/Year 5/Winter/CS 224N/Final Project/minbert-default-final-project/data/quora-dev.csv")
+    parser.add_argument("--para_test",   type=str, default="/Users/markbechthold/Desktop/School/Year 5/Winter/CS 224N/Final Project/minbert-default-final-project/data/quora-test-student.csv")
 
-    parser.add_argument("--sts_train", type=str, default="data/sts-train.csv")
-    parser.add_argument("--sts_dev",   type=str, default="data/sts-dev.csv")
-    parser.add_argument("--sts_test",  type=str, default="data/sts-test-student.csv")
+    parser.add_argument("--sts_train", type=str, default="/Users/markbechthold/Desktop/School/Year 5/Winter/CS 224N/Final Project/minbert-default-final-project/data/sts-train.csv")
+    parser.add_argument("--sts_dev",   type=str, default="/Users/markbechthold/Desktop/School/Year 5/Winter/CS 224N/Final Project/minbert-default-final-project/data/sts-dev.csv")
+    parser.add_argument("--sts_test",  type=str, default="/Users/markbechthold/Desktop/School/Year 5/Winter/CS 224N/Final Project/minbert-default-final-project/data/sts-test-student.csv")
 
     parser.add_argument("--seed",   type=int, default=11711)
     parser.add_argument("--epochs", type=int, default=10)
@@ -320,14 +372,14 @@ def get_args():
                         choices=('pretrain', 'finetune'), default="pretrain")
     parser.add_argument("--use_gpu", action='store_true')
 
-    parser.add_argument("--sst_dev_out",  type=str, default="predictions_multitask/sst-dev-output.csv")
-    parser.add_argument("--sst_test_out", type=str, default="predictions_multitask/sst-test-output.csv")
+    parser.add_argument("--sst_dev_out",  type=str, default="/Users/markbechthold/Desktop/School/Year 5/Winter/CS 224N/Final Project/minbert-default-final-project/predictions_multitask/sst-dev-output.csv")
+    parser.add_argument("--sst_test_out", type=str, default="/Users/markbechthold/Desktop/School/Year 5/Winter/CS 224N/Final Project/minbert-default-final-project/predictions_multitask/sst-test-output.csv")
 
-    parser.add_argument("--para_dev_out",  type=str, default="predictions_multitask/para-dev-output.csv")
-    parser.add_argument("--para_test_out", type=str, default="predictions_multitask/para-test-output.csv")
+    parser.add_argument("--para_dev_out",  type=str, default="/Users/markbechthold/Desktop/School/Year 5/Winter/CS 224N/Final Project/minbert-default-final-project/predictions_multitask/para-dev-output.csv")
+    parser.add_argument("--para_test_out", type=str, default="/Users/markbechthold/Desktop/School/Year 5/Winter/CS 224N/Final Project/minbert-default-final-project/predictions_multitask/para-test-output.csv")
 
-    parser.add_argument("--sts_dev_out",  type=str, default="predictions_multitask/sts-dev-output.csv")
-    parser.add_argument("--sts_test_out", type=str, default="predictions_multitask/sts-test-output.csv")
+    parser.add_argument("--sts_dev_out",  type=str, default="/Users/markbechthold/Desktop/School/Year 5/Winter/CS 224N/Final Project/minbert-default-final-project/predictions_multitask/sts-dev-output.csv")
+    parser.add_argument("--sts_test_out", type=str, default="/Users/markbechthold/Desktop/School/Year 5/Winter/CS 224N/Final Project/minbert-default-final-project/predictions_multitask/sts-test-output.csv")
 
     # hyper parameters
     parser.add_argument("--batch_size", help='sst: 64, cfimdb: 8 can fit a 12GB GPU', type=int, default=8)
@@ -338,9 +390,29 @@ def get_args():
     args = parser.parse_args()
     return args
 
+def tune_train(args):
+    ray.init(include_dashboard=False)
+    config = {
+        "connected": tune.grid_search([["S", "S", "S"],
+                                       ["I", "S", "S"],
+                                       ["I", "I", "S"],
+                                       ["I", "I", "I"],
+                                       ["I", "S", "I"],
+                                       ["S", "I", "S"],
+                                       ["S", "I", "I"],
+                                       ["S", "S", "I"]]),
+        "lr": tune.loguniform(1e-4, 1e-1),
+        "args": args,                                       
+    }
+    tuner = tune.Tuner(train_multitask, param_space=config)
+    results = tuner.fit()
+    print(results.get_best_result(metric="score", mode="min").config)
+    return results.get_best_result(metric="score", mode="min").config
+
+
 if __name__ == "__main__":
     args = get_args()
-    args.filepath = f'{args.option}-{args.epochs}-{args.lr}-multitask.pt' # save path
+    args.filepath = f'/Users/markbechthold/Desktop/School/Year 5/Winter/CS 224N/Final Project/minbert-default-final-project/{args.option}-{args.epochs}-{args.lr}-multitask.pt' # save path
     seed_everything(args.seed)  # fix the seed for reproducibility
-    train_multitask(args)
-    test_model(args)
+    config = tune_train(args)
+    test_model(args, config)
