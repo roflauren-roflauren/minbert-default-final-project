@@ -26,7 +26,8 @@ from datasets import load_multitask_data, load_multitask_test_data, \
     SentencePairDataset, SentencePairTestDataset
 
 
-TQDM_DISABLE = True
+TQDM_DISABLE = False
+PARAPHRASE_MAX_BATCHES = 1000
 
 # Evaluate a multitask model for accuracy.on SST only.
 def model_eval_sst(dataloader, model, device):
@@ -71,6 +72,8 @@ def model_eval_multitask(sentiment_dataloader,
 
         # Evaluate paraphrase detection.
         for step, batch in enumerate(tqdm(paraphrase_dataloader, desc=f'eval', disable=TQDM_DISABLE)):
+            if step == PARAPHRASE_MAX_BATCHES: break
+            
             (b_ids1, b_mask1,
              b_ids2, b_mask2,
              b_labels, b_sent_ids) = (batch['token_ids_1'], batch['attention_mask_1'],
@@ -119,7 +122,6 @@ def model_eval_multitask(sentiment_dataloader,
             sts_sent_ids.extend(b_sent_ids)
         pearson_mat = np.corrcoef(sts_y_pred,sts_y_true)
         sts_corr = pearson_mat[1][0]
-
 
         sst_y_true = []
         sst_y_pred = []
