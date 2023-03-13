@@ -290,7 +290,7 @@ def train_multitask(tune_config):
             loss = (sst_loss + para_loss + sts_loss) / 3
             
             
-            loss = loss.type(torch.FloatTensor)
+            loss = loss.type(torch.cuda.FloatTensor)
 
             loss.backward()
             optimizer.step()
