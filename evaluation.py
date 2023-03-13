@@ -229,10 +229,10 @@ def model_eval_test_multitask(sentiment_dataloader,
 
 
 def test_model_multitask(args, model, device):
-        sst_test_data, num_labels,para_test_data, sts_test_data = \
+        sst_test_data, num_labels, para_test_data, sts_test_data = \
             load_multitask_data(args.sst_test,args.para_test, args.sts_test, split='test')
 
-        sst_dev_data, num_labels,para_dev_data, sts_dev_data = \
+        sst_dev_data, num_labels, para_dev_data, sts_dev_data = \
             load_multitask_data(args.sst_dev,args.para_dev,args.sts_dev,split='dev')
 
         sst_test_data = SentenceClassificationTestDataset(sst_test_data, args)
