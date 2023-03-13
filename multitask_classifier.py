@@ -264,7 +264,7 @@ def train_multitask(args):
             save_model(model, optimizer, args, config, args.filepath)
 
         # report training loss
-        print(f"\nEPOCH {epoch}: TRAINING LOSS :: {train_loss :.3f}; DEV MULTITASK SCORE :: {multitask_score :.3f}")
+        print(f"\nEPOCH {epoch}: TRAINING LOSS :: {train_loss :.3f}; DEV MULTITASK SCORE :: {multitask_score :.3f}\n")
         
 
 def test_model(args):
