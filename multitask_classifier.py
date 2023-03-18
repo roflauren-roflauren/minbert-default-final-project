@@ -13,15 +13,22 @@ from tqdm import tqdm
 from datasets import SentenceClassificationDataset, SentencePairDataset, \
     load_multitask_data, load_multitask_test_data
 
-from evaluation import model_eval_sst, model_eval_multitask, test_model_multitask
+from evaluation import model_eval_sst, model_eval_multitask, model_eval_train_multitask, test_model_multitask
+
 from ray import tune
 import ray
 
+import pickle
+from copy import deepcopy
 
+ABSOLUTE_PATH_PREFIX = "/Users/ad2we/Desktop/2022_2023_Stanford/winqtr_2023/cs224n_dfp/minbert-default-final-project/"
 
-TQDM_DISABLE=False
+NUM_BATCHES_PER_EPOCH = 1000
+TQDM_DISABLE = True
+
+# CURRENTLY NOT IN USE
 LIMIT_PARAPHRASE_TRAIN_BATCHES = True
-PARAPHRASE_MAX_BATCHES = 1000
+PARAPHRASE_MAX_BATCHES = 100
 
 # fix the random seed
 def seed_everything(seed=11711):
@@ -34,14 +41,9 @@ def seed_everything(seed=11711):
     torch.backends.cudnn.deterministic = True
 
 
-BERT_HIDDEN_SIZE = 768
-N_SENTIMENT_CLASSES = 5
-
-
 class MultitaskBERT(nn.Module):
     '''
     This module should use BERT for 3 tasks:
-
     - Sentiment classification (predict_sentiment)
     - Paraphrase detection (predict_paraphrase)
     - Semantic Textual Similarity (predict_similarity)
@@ -67,12 +69,12 @@ class MultitaskBERT(nn.Module):
         self.sim_dropout = torch.nn.Dropout(config.hidden_dropout_prob)
         self.sim_linear  = torch.nn.Linear(config.hidden_size, config.hidden_size)
 
-        # sample extension parameter sharing regime: S - S - S 
+        # parameter sharing regime-specific architecture:
         self.connected_info = connected_info
-        num_shared = sum([1 if x=='S' else 0 for x in connected_info])
-        num_individual = sum([3 if x=='I' else 0 for x in connected_info])
-        self.shared = nn.ParameterList([torch.nn.Linear(config.hidden_size, config.hidden_size) for i in range(num_shared)])
-        self.individual = nn.ParameterList([torch.nn.Linear(config.hidden_size, config.hidden_size) for i in range(num_individual)])
+        num_shared          = sum([1 if x=='S' else 0 for x in connected_info])
+        num_individual      = sum([3 if x=='I' else 0 for x in connected_info])
+        self.shared         = nn.ModuleList([torch.nn.Linear(config.hidden_size, config.hidden_size) for i in range(num_shared)])
+        self.individual     = nn.ModuleList([torch.nn.Linear(config.hidden_size, config.hidden_size) for i in range(num_individual)])
 
         
     def forward(self, input_ids, attention_mask):
@@ -93,7 +95,6 @@ class MultitaskBERT(nn.Module):
         pooled = self.bert(input_ids, attention_mask)['pooler_output']
         
         # apply the parameter sharing regime: 
-        
         shared_index = 0
         individual_index = 0
         for val in self.connected_info:
@@ -121,7 +122,7 @@ class MultitaskBERT(nn.Module):
             self.bert(input_ids_2, attention_mask_2)['pooler_output']
         shared_index = 0
         individual_index = 1
-        print("number of individual layers: ", len(self.individual))
+        # print("number of individual layers: ", len(self.individual))
         for val in self.connected_info:
             if val == "S":
                 pooled1 = self.shared[shared_index](pooled1)
@@ -185,15 +186,14 @@ def save_model(model, optimizer, args, config, filepath):
     print(f"save the model to {filepath}")
 
 
-## Currently only trains on sst dataset
 def cycle(iterable): 
     """ Custom cycle generator which restarts an iterable after it is exhausted. """
     while True: 
         for elem in iterable: 
             yield elem 
+
 def train_multitask(tune_config):
     args = tune_config['args']
-   
     device = torch.device('cuda') if args.use_gpu else torch.device('cpu')
     
     # load data
@@ -219,8 +219,9 @@ def train_multitask(tune_config):
     sts_train_dataloader = DataLoader(sts_train_data, shuffle=True,  batch_size=args.batch_size, collate_fn=sts_train_data.collate_fn)
     sts_dev_dataloader   = DataLoader(sts_dev_data,   shuffle=False, batch_size=args.batch_size, collate_fn=sts_dev_data.collate_fn)
     
-    # since the paraphrase task has the largest train and dev datasets, we'll need a cycle generator for the other two tasks' dataloaders: 
-    sst_dataiter, sts_dataiter = iter(cycle(sst_train_dataloader)), iter(cycle(sts_train_dataloader))
+    # cycle generators for each dataloader: 
+    para_dataiter, sst_dataiter, sts_dataiter = \
+        iter(cycle(para_train_dataloader)), iter(cycle(sst_train_dataloader)), iter(cycle(sts_train_dataloader))
     
     # init model
     config = {'hidden_dropout_prob': args.hidden_dropout_prob,
@@ -236,19 +237,22 @@ def train_multitask(tune_config):
     lr = tune_config['lr']
     optimizer = AdamW(model.parameters(), lr=lr)
     best_multitask_score = 0
+    best_model = model
         
     # run for the specified number of epochs: 
-    
     for epoch in range(args.epochs):
         model.train()
         train_loss = 0
         num_batches = 0    
         
-        # iterate through training set dataloader with maximum number of batches (para dataset): 
-        for step, batch in enumerate(tqdm(para_train_dataloader, desc=f'train-{epoch}', disable=TQDM_DISABLE)):
+        # iterate through training set dataloader with maximum number of batches (NUM_BATCHES_PER_EPOCH): 
+        for _ in tqdm(range(NUM_BATCHES_PER_EPOCH), desc=f'training epoch num. {epoch}', disable=TQDM_DISABLE): 
+        
+        # CURRENTLY NOT IN USE:
+        # for step, batch in enumerate(tqdm(para_train_dataloader, desc=f'train-{epoch}', disable=TQDM_DISABLE)):
             # kill training if limiting paraphrase train batches and limit batch # hit: 
-            if LIMIT_PARAPHRASE_TRAIN_BATCHES: 
-                if step == PARAPHRASE_MAX_BATCHES: break 
+            # if LIMIT_PARAPHRASE_TRAIN_BATCHES: 
+            #     if step == PARAPHRASE_MAX_BATCHES: break 
                 
             # compute loss for sst task: 
             sst_batch = next(sst_dataiter)     
@@ -259,8 +263,8 @@ def train_multitask(tune_config):
             logits = model.predict_sentiment(b_ids, b_mask)
             sst_loss = F.cross_entropy(logits, b_labels.view(-1), reduction='sum') / args.batch_size            
             
-            # compute loss for para tasK: 
-            para_batch = batch
+            # compute loss for para task: 
+            para_batch = next(para_dataiter)
             
             (b_ids1, b_mask1, b_ids2, b_mask2, b_labels) = \
                 (para_batch['token_ids_1'], para_batch['attention_mask_1'], para_batch['token_ids_2'], para_batch['attention_mask_2'], para_batch['labels'])
@@ -272,7 +276,7 @@ def train_multitask(tune_config):
             b_labels = b_labels.flatten()
             para_loss = F.mse_loss(y_hat, b_labels.view(-1), reduction='sum') / args.batch_size
             
-            # compute loss for sst tasK: 
+            # compute loss for sts task: 
             sts_batch = next(sts_dataiter)
             
             (b_ids1, b_mask1, b_ids2, b_mask2, b_labels) = \
@@ -288,15 +292,12 @@ def train_multitask(tune_config):
             # compute average loss and propagate loss: 
             optimizer.zero_grad()
             loss = (sst_loss + para_loss + sts_loss) / 3
-            
-            
             loss = loss.type(torch.cuda.FloatTensor)
-
             loss.backward()
             optimizer.step()
             
             # record total training loss and batch count: 
-            train_loss += loss.item()
+            train_loss  += loss.item()
             num_batches += 1
         
         # evaluate models and report training characteristics: 
@@ -304,7 +305,9 @@ def train_multitask(tune_config):
 
         # training sets evaluation: 
         print("\nTRAINING SETS EVALUATIONS...")
-        model_eval_multitask(sst_train_dataloader, para_train_dataloader, sts_train_dataloader, model, device)
+        """ NOTE TO SELF: UNCOMMENT FOR SINGLETON RUNS """
+        # (train_para_accuracy, _, _, train_sentiment_accuracy, _, _, train_sts_corr, _, _) = \
+        #     model_eval_train_multitask(sst_train_dataloader, para_train_dataloader, sts_train_dataloader, model, device)
         
         # dev sets evaluation: 
         print("\nDEV SETS EVALUATIONS...")
@@ -315,13 +318,38 @@ def train_multitask(tune_config):
         multitask_score = (dev_paraphrase_accuracy + dev_sentiment_accuracy + dev_sts_corr) / 3
         if multitask_score > best_multitask_score: 
             best_multitask_score = multitask_score
-            # save the new best model: 
-            print("\nSAVING MODEL...")
-            save_model(model, optimizer, args, config, args.filepath)
+            """ NOTE TO SELF: UNCOMMENT ALL LINES FOR SINGLETON RUNS"""
+            # # save the new best model: 
+            # print("\nSAVING MODEL...")
+            # save_model(model, optimizer, args, config, args.filepath)
+            # # locally retain the best model: 
+            # best_model = deepcopy(model)
 
         # report training loss
-        print(f"\nEPOCH {epoch}: TRAINING LOSS :: {train_loss :.3f}; DEV MULTITASK SCORE :: {multitask_score :.3f}")
-    return {"score": multitask_score}
+        """ NOTE TO SELF: UNCOMMENT FOR SINGLETON RUNS"""
+        # print(f"\nEPOCH {epoch}: TRAINING LOSS :: {train_loss :.3f}; DEV MULTITASK SCORE :: {multitask_score :.3f}")
+        
+        # log training characterisitcs (training set loss & score characteristics per epoch)
+        """ NOTE TO SELF: UNCOMMENT FOR SINGLETON RUNS"""
+        # with open(ABSOLUTE_PATH_PREFIX + "training_characteristics.txt", 'a+', encoding='utf-8') as f: 
+        #     for line in f:
+        #         if line.isspace(): break
+        #     f.write(f'Epoch {epoch}, training loss :: {train_loss :.3f}, training set task scores [para. acc. - senti. acc. - sts. corr.] :: {train_para_accuracy :.3f}, {train_sentiment_accuracy :.3f}, {train_sts_corr :.3f}, dev set task scores [para. acc. - senti. acc. - sts. corr.] :: {dev_paraphrase_accuracy :.3f}, {dev_sentiment_accuracy :.3f}, {dev_sts_corr :.3f}, dev set mtt score: {multitask_score :.3f}' + '\n')
+    
+    # CURRENTLY NOT IN USE:    
+    # print("FIRST SET DEV MODEL MULTITASK FIGS...")
+    # (dev_paraphrase_accuracy, _ , _ , dev_sentiment_accuracy, _ , _ , dev_sts_corr, _ , _) = \
+    #         model_eval_multitask(sst_dev_dataloader, para_dev_dataloader, sts_dev_dataloader, model, device)
+    # print(f'dev sent acc :: {dev_sentiment_accuracy :.3f}, dev para acc :: {dev_paraphrase_accuracy :.3f}, dev sts corr :: {dev_sts_corr :.3f}')
+    # print("SECOND SET DEV MODEL MULTITASK FIGS...")
+    # test_model(args, tune_config=tune_config)
+    
+    # test the model within this training function: 
+    """ NOTE TO SELF: UNCOMMENT FOR SINGLETON RUNS"""
+    # test_model_multitask(args, best_model, device)
+    # print("DONE TESTING BEST MODEL...")
+    
+    return {"score": best_multitask_score}
         
 
 def test_model(args, tune_config):
@@ -340,17 +368,17 @@ def test_model(args, tune_config):
 
 def get_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--sst_train", type=str, default="/Users/markbechthold/Desktop/School/Year 5/Winter/CS 224N/Final Project/minbert-default-final-project/data/ids-sst-train.csv")
-    parser.add_argument("--sst_dev",   type=str, default="/Users/markbechthold/Desktop/School/Year 5/Winter/CS 224N/Final Project/minbert-default-final-project/data/ids-sst-dev.csv")
-    parser.add_argument("--sst_test",  type=str, default="/Users/markbechthold/Desktop/School/Year 5/Winter/CS 224N/Final Project/minbert-default-final-project/data/ids-sst-test-student.csv")
+    parser.add_argument("--sst_train",  type=str, default=ABSOLUTE_PATH_PREFIX + "data/ids-sst-train.csv")
+    parser.add_argument("--sst_dev",    type=str, default=ABSOLUTE_PATH_PREFIX + "data/ids-sst-dev.csv")
+    parser.add_argument("--sst_test",   type=str, default=ABSOLUTE_PATH_PREFIX + "data/ids-sst-test-student.csv")
 
-    parser.add_argument("--para_train", type=str, default="/Users/markbechthold/Desktop/School/Year 5/Winter/CS 224N/Final Project/minbert-default-final-project/data/quora-train.csv")
-    parser.add_argument("--para_dev",   type=str, default="/Users/markbechthold/Desktop/School/Year 5/Winter/CS 224N/Final Project/minbert-default-final-project/data/quora-dev.csv")
-    parser.add_argument("--para_test",   type=str, default="/Users/markbechthold/Desktop/School/Year 5/Winter/CS 224N/Final Project/minbert-default-final-project/data/quora-test-student.csv")
+    parser.add_argument("--para_train", type=str, default=ABSOLUTE_PATH_PREFIX + "data/quora-train.csv")
+    parser.add_argument("--para_dev",   type=str, default=ABSOLUTE_PATH_PREFIX + "data/quora-dev.csv")
+    parser.add_argument("--para_test",  type=str, default=ABSOLUTE_PATH_PREFIX + "data/quora-test-student.csv")
 
-    parser.add_argument("--sts_train", type=str, default="/Users/markbechthold/Desktop/School/Year 5/Winter/CS 224N/Final Project/minbert-default-final-project/data/sts-train.csv")
-    parser.add_argument("--sts_dev",   type=str, default="/Users/markbechthold/Desktop/School/Year 5/Winter/CS 224N/Final Project/minbert-default-final-project/data/sts-dev.csv")
-    parser.add_argument("--sts_test",  type=str, default="/Users/markbechthold/Desktop/School/Year 5/Winter/CS 224N/Final Project/minbert-default-final-project/data/sts-test-student.csv")
+    parser.add_argument("--sts_train",  type=str, default=ABSOLUTE_PATH_PREFIX + "data/sts-train.csv")
+    parser.add_argument("--sts_dev",    type=str, default=ABSOLUTE_PATH_PREFIX + "data/sts-dev.csv")
+    parser.add_argument("--sts_test",   type=str, default=ABSOLUTE_PATH_PREFIX + "data/sts-test-student.csv")
 
     parser.add_argument("--seed",   type=int, default=11711)
     parser.add_argument("--epochs", type=int, default=10)
@@ -359,14 +387,14 @@ def get_args():
                         choices=('pretrain', 'finetune'), default="pretrain")
     parser.add_argument("--use_gpu", action='store_true')
 
-    parser.add_argument("--sst_dev_out",  type=str, default="/Users/markbechthold/Desktop/School/Year 5/Winter/CS 224N/Final Project/minbert-default-final-project/predictions_multitask/sst-dev-output.csv")
-    parser.add_argument("--sst_test_out", type=str, default="/Users/markbechthold/Desktop/School/Year 5/Winter/CS 224N/Final Project/minbert-default-final-project/predictions_multitask/sst-test-output.csv")
+    parser.add_argument("--sst_dev_out",  type=str, default=ABSOLUTE_PATH_PREFIX + "predictions/sst-dev-output.csv")
+    parser.add_argument("--sst_test_out", type=str, default=ABSOLUTE_PATH_PREFIX + "predictions/sst-test-output.csv")
 
-    parser.add_argument("--para_dev_out",  type=str, default="/Users/markbechthold/Desktop/School/Year 5/Winter/CS 224N/Final Project/minbert-default-final-project/predictions_multitask/para-dev-output.csv")
-    parser.add_argument("--para_test_out", type=str, default="/Users/markbechthold/Desktop/School/Year 5/Winter/CS 224N/Final Project/minbert-default-final-project/predictions_multitask/para-test-output.csv")
+    parser.add_argument("--para_dev_out",  type=str, default=ABSOLUTE_PATH_PREFIX + "predictions/para-dev-output.csv")
+    parser.add_argument("--para_test_out", type=str, default=ABSOLUTE_PATH_PREFIX + "predictions/para-test-output.csv")
 
-    parser.add_argument("--sts_dev_out",  type=str, default="/Users/markbechthold/Desktop/School/Year 5/Winter/CS 224N/Final Project/minbert-default-final-project/predictions_multitask/sts-dev-output.csv")
-    parser.add_argument("--sts_test_out", type=str, default="/Users/markbechthold/Desktop/School/Year 5/Winter/CS 224N/Final Project/minbert-default-final-project/predictions_multitask/sts-test-output.csv")
+    parser.add_argument("--sts_dev_out",  type=str, default=ABSOLUTE_PATH_PREFIX + "predictions/sts-dev-output.csv")
+    parser.add_argument("--sts_test_out", type=str, default=ABSOLUTE_PATH_PREFIX + "predictions/sts-test-output.csv")
 
     # hyper parameters
     parser.add_argument("--batch_size", help='sst: 64, cfimdb: 8 can fit a 12GB GPU', type=int, default=8)
@@ -377,29 +405,46 @@ def get_args():
     args = parser.parse_args()
     return args
 
+
 def tune_train(args):
-    ray.init(include_dashboard=False)
+    ray.init(include_dashboard=False, log_to_driver=True, num_gpus=1, object_store_memory=1* 1024 * 1024 * 1024)
     config = {
-        "connected": tune.grid_search([["S", "S", "S"],
-                                       ["I", "S", "S"],
-                                       ["I", "I", "S"],
-                                       ["I", "I", "I"],
-                                       ["I", "S", "I"],
-                                       ["S", "I", "S"],
-                                       ["S", "I", "I"],
-                                       ["S", "S", "I"]]),
-        "lr": tune.loguniform(1e-4, 1e-1),
-        "args": args,                                       
+        "connected": tune.grid_search([
+            # ["S", "S", "S"],
+            ["I", "S", "S"],
+            # ["I", "I", "S"],
+            # ["I", "I", "I"],
+            # ["I", "S", "I"],
+            # ["S", "I", "S"],
+            # ["S", "I", "I"],
+            # ["S", "S", "I"]
+        ]),
+        "lr" : 4.58665e-07,
+        # "lr" : tune.loguniform(1e-1, 1e-7, base=10),
+        "args": args,                              
     }
     tuner = tune.Tuner(train_multitask, param_space=config)
+    # train_multitask_w_resources = tune.with_resources(train_multitask, resources={"CPU": 4, "GPU": 0.25, "memory": 2 * 1024 * 1024 * 1024})
+    # tuner = tune.Tuner(train_multitask, param_space=config, 
+    #                     tune_config=tune.TuneConfig(metric='score', mode='max', num_samples=3, max_concurrent_trials=-1))
     results = tuner.fit()
-    print(results.get_best_result(metric="score", mode="min").config)
-    return results.get_best_result(metric="score", mode="min").config
+    print("\nBEST RESULTS CONFIG...")
+    # print(results.get_dataframe())
+    print(str(results.get_best_result(metric="score", mode="max").config['connected']))
+    print(str(results.get_best_result(metric="score", mode="max").config['lr']))
+    return results.get_best_result(metric="score", mode="max").config
 
 
-if __name__ == "__main__":
+if __name__ == "__main__":    
     args = get_args()
-    args.filepath = f'/Users/markbechthold/Desktop/School/Year 5/Winter/CS 224N/Final Project/minbert-default-final-project/{args.option}-{args.epochs}-{args.lr}-multitask.pt' # save path
+    args.filepath = ABSOLUTE_PATH_PREFIX + f'{args.option}-epochs_{args.epochs}-multitask.pt' # save path
     seed_everything(args.seed)  # fix the seed for reproducibility
-    config = tune_train(args)
-    test_model(args, config)
+    best_config = tune_train(args)
+    # # currently tesitng the model within the tune_train() function call:
+    # uncomment this line if testing outside of tune_train(): test_model(args, best_config)
+
+# before each run, remember to check/move: 
+    # training_characteristics.txt file 
+    # predictions from /predictions dir 
+    # .pt model file 
+# from /minbert-default-final-project directory to ./extensions_materials 
