@@ -235,6 +235,7 @@ def train_multitask(tune_config):
     model = model.to(device)
 
     lr = tune_config['lr']
+    [para_lossweight, sst_lossweight, sts_lossweight] = tune_config['lossweights']
     optimizer = AdamW(model.parameters(), lr=lr)
     best_multitask_score = 0
     best_model = model
@@ -291,7 +292,9 @@ def train_multitask(tune_config):
             
             # compute average loss and propagate loss: 
             optimizer.zero_grad()
-            loss = (sst_loss + para_loss + sts_loss) / 3
+            """ NOTE TO SELF: UNCOMMENT-COMMENT FOR RUNS USING VARIABLE LOSS WEIGHTS"""
+            loss = (sst_loss * sst_lossweight) + (para_loss * para_lossweight) + (sts_loss * sts_lossweight)
+            # loss = (sst_loss + para_loss + sts_loss) / 3
             loss = loss.type(torch.cuda.FloatTensor)
             loss.backward()
             optimizer.step()
@@ -306,8 +309,8 @@ def train_multitask(tune_config):
         # training sets evaluation: 
         print("\nTRAINING SETS EVALUATIONS...")
         """ NOTE TO SELF: UNCOMMENT FOR SINGLETON RUNS """
-        # (train_para_accuracy, _, _, train_sentiment_accuracy, _, _, train_sts_corr, _, _) = \
-        #     model_eval_train_multitask(sst_train_dataloader, para_train_dataloader, sts_train_dataloader, model, device)
+        (train_para_accuracy, _, _, train_sentiment_accuracy, _, _, train_sts_corr, _, _) = \
+            model_eval_train_multitask(sst_train_dataloader, para_train_dataloader, sts_train_dataloader, model, device)
         
         # dev sets evaluation: 
         print("\nDEV SETS EVALUATIONS...")
@@ -319,22 +322,22 @@ def train_multitask(tune_config):
         if multitask_score > best_multitask_score: 
             best_multitask_score = multitask_score
             """ NOTE TO SELF: UNCOMMENT ALL LINES FOR SINGLETON RUNS"""
-            # # save the new best model: 
-            # print("\nSAVING MODEL...")
-            # save_model(model, optimizer, args, config, args.filepath)
-            # # locally retain the best model: 
-            # best_model = deepcopy(model)
+            # save the new best model: 
+            print("\nSAVING MODEL...")
+            save_model(model, optimizer, args, config, args.filepath)
+            # locally retain the best model: 
+            best_model = deepcopy(model)
 
         # report training loss
         """ NOTE TO SELF: UNCOMMENT FOR SINGLETON RUNS"""
-        # print(f"\nEPOCH {epoch}: TRAINING LOSS :: {train_loss :.3f}; DEV MULTITASK SCORE :: {multitask_score :.3f}")
+        print(f"\nEPOCH {epoch}: TRAINING LOSS :: {train_loss :.3f}; DEV MULTITASK SCORE :: {multitask_score :.3f}")
         
         # log training characterisitcs (training set loss & score characteristics per epoch)
         """ NOTE TO SELF: UNCOMMENT FOR SINGLETON RUNS"""
-        # with open(ABSOLUTE_PATH_PREFIX + "training_characteristics.txt", 'a+', encoding='utf-8') as f: 
-        #     for line in f:
-        #         if line.isspace(): break
-        #     f.write(f'Epoch {epoch}, training loss :: {train_loss :.3f}, training set task scores [para. acc. - senti. acc. - sts. corr.] :: {train_para_accuracy :.3f}, {train_sentiment_accuracy :.3f}, {train_sts_corr :.3f}, dev set task scores [para. acc. - senti. acc. - sts. corr.] :: {dev_paraphrase_accuracy :.3f}, {dev_sentiment_accuracy :.3f}, {dev_sts_corr :.3f}, dev set mtt score: {multitask_score :.3f}' + '\n')
+        with open(ABSOLUTE_PATH_PREFIX + "training_characteristics.txt", 'a+', encoding='utf-8') as f: 
+            for line in f:
+                if line.isspace(): break
+            f.write(f'Epoch {epoch}, training loss :: {train_loss :.3f}, training set task scores [para. acc. - senti. acc. - sts. corr.] :: {train_para_accuracy :.3f}, {train_sentiment_accuracy :.3f}, {train_sts_corr :.3f}, dev set task scores [para. acc. - senti. acc. - sts. corr.] :: {dev_paraphrase_accuracy :.3f}, {dev_sentiment_accuracy :.3f}, {dev_sts_corr :.3f}, dev set mtt score: {multitask_score :.3f}' + '\n')
     
     # CURRENTLY NOT IN USE:    
     # print("FIRST SET DEV MODEL MULTITASK FIGS...")
@@ -346,8 +349,8 @@ def train_multitask(tune_config):
     
     # test the model within this training function: 
     """ NOTE TO SELF: UNCOMMENT FOR SINGLETON RUNS"""
-    # test_model_multitask(args, best_model, device)
-    # print("DONE TESTING BEST MODEL...")
+    test_model_multitask(args, best_model, device)
+    print("DONE TESTING BEST MODEL...")
     
     return {"score": best_multitask_score}
         
@@ -407,7 +410,7 @@ def get_args():
 
 
 def tune_train(args):
-    ray.init(include_dashboard=False, log_to_driver=True, num_gpus=1, object_store_memory=1* 1024 * 1024 * 1024)
+    ray.init(include_dashboard=False, log_to_driver=True, num_gpus=1) # , object_store_memory=1* 1024 * 1024 * 1024)
     config = {
         "connected": tune.grid_search([
             # ["S", "S", "S"],
@@ -419,19 +422,33 @@ def tune_train(args):
             # ["S", "I", "I"],
             # ["S", "S", "I"]
         ]),
-        "lr" : 4.58665e-07,
+        
+        
+        # "lossweights" : tune.grid_search([
+        #     # [0.33, 0.33, 0.33], # default // no changes val. (order - para, sst, sts)
+        #     # [0.40, 0.40, 0.20], 
+        #     [0.40, 0.20, 0.40], # try this one 
+        #     # [0.20, 0.40, 0.40], 
+        #     # [0.50, 0.25, 0.25],
+        #     # [0.25, 0.50, 0.25], # and this one
+        #     # [0.25, 0.25, 0.50]
+        # ]), 
+        "lr" : 8.56487702692805E-06,
         # "lr" : tune.loguniform(1e-1, 1e-7, base=10),
         "args": args,                              
     }
-    tuner = tune.Tuner(train_multitask, param_space=config)
-    # train_multitask_w_resources = tune.with_resources(train_multitask, resources={"CPU": 4, "GPU": 0.25, "memory": 2 * 1024 * 1024 * 1024})
-    # tuner = tune.Tuner(train_multitask, param_space=config, 
-    #                     tune_config=tune.TuneConfig(metric='score', mode='max', num_samples=3, max_concurrent_trials=-1))
+    # tuner = tune.Tuner(train_multitask, param_space=config)
+    tuner = tune.Tuner(train_multitask, param_space=config, tune_config=tune.TuneConfig(metric='score', mode='max', num_samples=1, max_concurrent_trials=1))
     results = tuner.fit()
     print("\nBEST RESULTS CONFIG...")
+    best_result_config = results.get_best_result(metric="score", mode="max").config
+    print(' REGIME: ' + str(best_result_config['connected']) + ' LEARNING RATE: ' + str(best_result_config['lr']) + \
+        ' LOSS WEIGHTING (PARA, SST, STS): ' + str(best_result_config['lossweights']))
+    
     # print(results.get_dataframe())
-    print(str(results.get_best_result(metric="score", mode="max").config['connected']))
-    print(str(results.get_best_result(metric="score", mode="max").config['lr']))
+    # print(str(results.get_best_result(metric="score", mode="max").config['connected']))
+    # print(str(results.get_best_result(metric="score", mode="max").config['lr']))
+    
     return results.get_best_result(metric="score", mode="max").config
 
 
