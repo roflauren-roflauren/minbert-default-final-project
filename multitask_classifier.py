@@ -21,7 +21,9 @@ import ray
 import pickle
 from copy import deepcopy
 
-ABSOLUTE_PATH_PREFIX = "/Users/ad2we/Desktop/2022_2023_Stanford/winqtr_2023/cs224n_dfp/minbert-default-final-project/"
+#ABSOLUTE_PATH_PREFIX = "/Users/ad2we/Desktop/2022_2023_Stanford/winqtr_2023/cs224n_dfp/minbert-default-final-project/"
+ABSOLUTE_PATH_PREFIX = "/Users/callumburgess/Documents/classes/CS 224N/minbert-default-final-project/"
+
 
 NUM_BATCHES_PER_EPOCH = 1000
 TQDM_DISABLE = True
@@ -48,7 +50,7 @@ class MultitaskBERT(nn.Module):
     - Paraphrase detection (predict_paraphrase)
     - Semantic Textual Similarity (predict_similarity)
     '''
-    def __init__(self, config, connected_info):        
+    def __init__(self, config, connected_info, subsets=False):        
         super(MultitaskBERT, self).__init__()
         # You will want to add layers here to perform the downstream tasks.
         # Pretrain mode does not require updating bert paramters.
@@ -71,11 +73,16 @@ class MultitaskBERT(nn.Module):
 
         # parameter sharing regime-specific architecture:
         self.connected_info = connected_info
+
         num_shared          = sum([1 if x=='S' else 0 for x in connected_info])
         num_individual      = sum([3 if x=='I' else 0 for x in connected_info])
+        if subsets:
+            num_shared          = sum([1 if x=='S' else 0 for x in connected_info])
+            num_individual      = sum([3 if x=='I' else 0 for x in connected_info]) + num_shared
+            print("BIG MONEY",num_shared, num_individual)
         self.shared         = nn.ModuleList([torch.nn.Linear(config.hidden_size, config.hidden_size) for i in range(num_shared)])
         self.individual     = nn.ModuleList([torch.nn.Linear(config.hidden_size, config.hidden_size) for i in range(num_individual)])
-
+        self.subsets = subsets
         
     def forward(self, input_ids, attention_mask):
         'Takes a batch of sentences and produces embeddings for them.'
@@ -97,15 +104,31 @@ class MultitaskBERT(nn.Module):
         # apply the parameter sharing regime: 
         shared_index = 0
         individual_index = 0
+        subset_index = 0 
         for val in self.connected_info:
-            if val == "S":
-                pooled = self.shared[shared_index](pooled)
-                pooled = nn.ReLU()(pooled)
-                shared_index += 1
-            if val == "I":
-                pooled = self.individual[individual_index](pooled)
-                pooled = nn.ReLU()(pooled)
-                individual_index += 3
+            if not self.subsets: 
+                if val == "S":
+                    pooled = self.shared[shared_index](pooled)
+                    pooled = nn.ReLU()(pooled)
+                    shared_index += 1
+                if val == "I":
+                    pooled = self.individual[individual_index](pooled)
+                    pooled = nn.ReLU()(pooled)
+                    individual_index += 3
+            else: 
+                print(individual_index)
+                if val == "S" and self.connected_info[0] != 0:
+                    pooled = self.shared[shared_index](pooled)
+                    pooled = nn.ReLU()(pooled)
+                    shared_index += 1
+                if val == "S" and self.connected_info[0] == 0:
+                    pooled = self.individual[-1-subset_index](pooled)
+                    pooled = nn.ReLU()(pooled)
+                    subset_index += 1
+                if val == "I":
+                    pooled = self.individual[individual_index](pooled)
+                    pooled = nn.ReLU()(pooled)
+                    individual_index += 3
 
         logits = self.stm_linear(self.stm_dropout(pooled))
         return F.log_softmax(logits, dim=1)
@@ -122,20 +145,42 @@ class MultitaskBERT(nn.Module):
             self.bert(input_ids_2, attention_mask_2)['pooler_output']
         shared_index = 0
         individual_index = 1
+        subset_index = 0
         # print("number of individual layers: ", len(self.individual))
         for val in self.connected_info:
-            if val == "S":
-                pooled1 = self.shared[shared_index](pooled1)
-                pooled1 = nn.ReLU()(pooled1)
-                pooled2 = self.shared[shared_index](pooled2)
-                pooled2 = nn.ReLU()(pooled2)
-                shared_index += 1
-            if val == "I":
-                pooled1 = self.individual[individual_index](pooled1)
-                pooled1 = nn.ReLU()(pooled1)
-                pooled2 = self.individual[individual_index](pooled2)
-                pooled2 = nn.ReLU()(pooled2)
-                individual_index += 3
+            if not self.subsets:
+                if val == "S":
+                    pooled1 = self.shared[shared_index](pooled1)
+                    pooled1 = nn.ReLU()(pooled1)
+                    pooled2 = self.shared[shared_index](pooled2)
+                    pooled2 = nn.ReLU()(pooled2)
+                    shared_index += 1
+                if val == "I":
+                    pooled1 = self.individual[individual_index](pooled1)
+                    pooled1 = nn.ReLU()(pooled1)
+                    pooled2 = self.individual[individual_index](pooled2)
+                    pooled2 = nn.ReLU()(pooled2)
+                    individual_index += 3
+            else: 
+                if val == "S" and self.connected_info[0] != 1:
+                    pooled1 = self.shared[shared_index](pooled1)
+                    pooled1 = nn.ReLU()(pooled1)
+                    pooled2 = self.shared[shared_index](pooled2)
+                    pooled2 = nn.ReLU()(pooled2)
+                    shared_index += 1
+                if val == "S" and self.connected_info[0] == 1:
+                    pooled1 = self.individual[-1 - subset_index](pooled1)
+                    pooled1 = nn.ReLU()(pooled1)
+                    pooled2 = self.individual[-1 - subset_index](pooled2)
+                    pooled2 = nn.ReLU()(pooled2)
+                    subset_index += 1
+                if val == "I":
+                    pooled1 = self.individual[individual_index](pooled1)
+                    pooled1 = nn.ReLU()(pooled1)
+                    pooled2 = self.individual[individual_index](pooled2)
+                    pooled2 = nn.ReLU()(pooled2)
+                    individual_index += 3
+
         logit = self.ppr_linear(self.ppr_dropout(pooled1 + pooled2))
         return logit
 
@@ -151,19 +196,44 @@ class MultitaskBERT(nn.Module):
         # transform pooled outputs: 
         shared_index = 0
         individual_index = 2
+        subset_index = 0
         for val in self.connected_info:
-            if val == "S":
-                pooled1 = self.shared[shared_index](pooled1)
-                pooled1 = nn.ReLU()(pooled1)
-                pooled2 = self.shared[shared_index](pooled2)
-                pooled2 = nn.ReLU()(pooled2)
-                shared_index += 1
-            if val == "I":
-                pooled1 = self.individual[individual_index](pooled1)
-                pooled1 = nn.ReLU()(pooled1)
-                pooled2 = self.individual[individual_index](pooled2)
-                pooled2 = nn.ReLU()(pooled2)
-                individual_index += 3
+            if not self.subsets:
+                if val == "S":
+                    pooled1 = self.shared[shared_index](pooled1)
+                    pooled1 = nn.ReLU()(pooled1)
+                    pooled2 = self.shared[shared_index](pooled2)
+                    pooled2 = nn.ReLU()(pooled2)
+                    shared_index += 1
+                if val == "I":
+                    pooled1 = self.individual[individual_index](pooled1)
+                    pooled1 = nn.ReLU()(pooled1)
+                    pooled2 = self.individual[individual_index](pooled2)
+                    pooled2 = nn.ReLU()(pooled2)
+                    individual_index += 3
+            else: 
+                print(val, individual_index)
+
+                if val == "S" and self.connected_info[0] != 2:
+                    pooled1 = self.shared[shared_index](pooled1)
+                    pooled1 = nn.ReLU()(pooled1)
+                    pooled2 = self.shared[shared_index](pooled2)
+                    pooled2 = nn.ReLU()(pooled2)
+                    shared_index += 1
+                if val == "S" and self.connected_info[0] == 2:
+                    pooled1 = self.individual[-1-subset_index](pooled1)
+                    pooled1 = nn.ReLU()(pooled1)
+                    pooled2 = self.individual[-1-subset_index](pooled2)
+                    pooled2 = nn.ReLU()(pooled2)
+                    subset_index += 1
+                if val == "I":
+                    pooled1 = self.individual[individual_index](pooled1)
+                    pooled1 = nn.ReLU()(pooled1)
+                    pooled2 = self.individual[individual_index](pooled2)
+                    pooled2 = nn.ReLU()(pooled2)
+                    individual_index += 3
+
+
         transform1, transform2 = self.sim_linear(self.sim_dropout(pooled1)), \
             self.sim_linear(self.sim_dropout(pooled2))
         # compute cosine similarity score:  
@@ -231,7 +301,7 @@ def train_multitask(tune_config):
               'option': args.option}
     config = SimpleNamespace(**config)
 
-    model = MultitaskBERT(config, tune_config['connected'])
+    model = MultitaskBERT(config, tune_config['connected'], tune_config['subsets'])
     model = model.to(device)
 
     lr = tune_config['lr']
@@ -414,25 +484,37 @@ def tune_train(args):
     config = {
         "connected": tune.grid_search([
             # ["S", "S", "S"],
-            ["I", "S", "S"],
+            #["I", "S", "S"],
             # ["I", "I", "S"],
             # ["I", "I", "I"],
             # ["I", "S", "I"],
             # ["S", "I", "S"],
             # ["S", "I", "I"],
-            # ["S", "S", "I"]
+            # ["S", "S", "I"], 
+            [0, "I", "S", "S"],
+            [1, "I", "S", "S"],
+            [2, "I", "S", "S"],
+            [0, "S", "S", "I"],
+            [1, "S", "S", "I"],
+            [2, "S", "S", "I"],
+            [0, "S", "I", "S"],
+            [1, "S", "I", "S"],
+            [2, "S", "I", "S"],
+
         ]),
+
+        "subsets": True, 
         
         
-        # "lossweights" : tune.grid_search([
-        #     # [0.33, 0.33, 0.33], # default // no changes val. (order - para, sst, sts)
+        "lossweights" : tune.grid_search([
+            [0.33, 0.33, 0.33], # default // no changes val. (order - para, sst, sts)
         #     # [0.40, 0.40, 0.20], 
         #     [0.40, 0.20, 0.40], # try this one 
         #     # [0.20, 0.40, 0.40], 
         #     # [0.50, 0.25, 0.25],
         #     # [0.25, 0.50, 0.25], # and this one
         #     # [0.25, 0.25, 0.50]
-        # ]), 
+        ]), 
         "lr" : 8.56487702692805E-06,
         # "lr" : tune.loguniform(1e-1, 1e-7, base=10),
         "args": args,                              
