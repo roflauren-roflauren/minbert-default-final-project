@@ -21,8 +21,8 @@ import ray
 import pickle
 from copy import deepcopy
 
-#ABSOLUTE_PATH_PREFIX = "/Users/ad2we/Desktop/2022_2023_Stanford/winqtr_2023/cs224n_dfp/minbert-default-final-project/"
-ABSOLUTE_PATH_PREFIX = "/Users/callumburgess/Documents/classes/CS 224N/minbert-default-final-project/"
+ABSOLUTE_PATH_PREFIX = "/Users/ad2we/Desktop/2022_2023_Stanford/winqtr_2023/cs224n_dfp/minbert-default-final-project/"
+#ABSOLUTE_PATH_PREFIX = "/Users/callumburgess/Documents/classes/CS 224N/minbert-default-final-project/"
 
 
 NUM_BATCHES_PER_EPOCH = 1000
@@ -79,7 +79,7 @@ class MultitaskBERT(nn.Module):
         if subsets:
             num_shared          = sum([1 if x=='S' else 0 for x in connected_info])
             num_individual      = sum([3 if x=='I' else 0 for x in connected_info]) + num_shared
-            print("BIG MONEY",num_shared, num_individual)
+            # print("BIG MONEY",num_shared, num_individual)
         self.shared         = nn.ModuleList([torch.nn.Linear(config.hidden_size, config.hidden_size) for i in range(num_shared)])
         self.individual     = nn.ModuleList([torch.nn.Linear(config.hidden_size, config.hidden_size) for i in range(num_individual)])
         self.subsets = subsets
@@ -99,6 +99,8 @@ class MultitaskBERT(nn.Module):
         (0 - negative, 1- somewhat negative, 2- neutral, 3- somewhat positive, 4- positive)
         Thus, your output should contain 5 logits for each sentence.
         '''
+        # alt pooled can try:
+        # pooled = self.bert(input_ids, attention_mask)['last_hidden_state'].sum(dim=1)
         pooled = self.bert(input_ids, attention_mask)['pooler_output']
         
         # apply the parameter sharing regime: 
@@ -116,7 +118,7 @@ class MultitaskBERT(nn.Module):
                     pooled = nn.ReLU()(pooled)
                     individual_index += 3
             else: 
-                print(individual_index)
+                # print(individual_index)
                 if val == "S" and self.connected_info[0] != 0:
                     pooled = self.shared[shared_index](pooled)
                     pooled = nn.ReLU()(pooled)
@@ -141,8 +143,12 @@ class MultitaskBERT(nn.Module):
         Note that your output should be unnormalized (a logit); it will be passed to the sigmoid function
         during evaluation, and handled as a logit by the appropriate loss function.
         '''
+        # alternate para head can try: 
+        # pooled1, pooled2 = self.bert(input_ids_1, attention_mask_1)['last_hidden_state'].sum(dim=1), \
+        #     self.bert(input_ids_2, attention_mask_2)['last_hidden_state'].sum(dim=1)
         pooled1, pooled2 = self.bert(input_ids_1, attention_mask_1)['pooler_output'], \
             self.bert(input_ids_2, attention_mask_2)['pooler_output']
+        
         shared_index = 0
         individual_index = 1
         subset_index = 0
@@ -191,8 +197,12 @@ class MultitaskBERT(nn.Module):
         '''Given a batch of pairs of sentences, outputs a single logit corresponding to how similar they are.
         Note that your output should a sensical input to the loss function used to evaluate STS; i.e., MSE loss.
         '''
-        pooled1, pooled2 = self.bert(input_ids_1, attention_mask_1)['pooler_output'], \
-            self.bert(input_ids_2, attention_mask_2)['pooler_output']
+        # alternate sts head can try: 
+        pooled1, pooled2 = self.bert(input_ids_1, attention_mask_1)['last_hidden_state'].sum(dim=1), \
+            self.bert(input_ids_2, attention_mask_2)['last_hidden_state'].sum(dim=1)
+        # pooled1, pooled2 = self.bert(input_ids_1, attention_mask_1)['pooler_output'], \
+        #     self.bert(input_ids_2, attention_mask_2)['pooler_output']
+        
         # transform pooled outputs: 
         shared_index = 0
         individual_index = 2
@@ -212,7 +222,7 @@ class MultitaskBERT(nn.Module):
                     pooled2 = nn.ReLU()(pooled2)
                     individual_index += 3
             else: 
-                print(val, individual_index)
+                # print(val, individual_index)
 
                 if val == "S" and self.connected_info[0] != 2:
                     pooled1 = self.shared[shared_index](pooled1)
@@ -238,6 +248,7 @@ class MultitaskBERT(nn.Module):
             self.sim_linear(self.sim_dropout(pooled2))
         # compute cosine similarity score:  
         logit = (F.cosine_similarity(transform1, transform2) + 1) * 2.5
+        # logit = F.relu(F.cosine_similarity(transform1, transform2)) * 5
         return logit
 
 
@@ -363,8 +374,8 @@ def train_multitask(tune_config):
             # compute average loss and propagate loss: 
             optimizer.zero_grad()
             """ NOTE TO SELF: UNCOMMENT-COMMENT FOR RUNS USING VARIABLE LOSS WEIGHTS"""
-            loss = (sst_loss * sst_lossweight) + (para_loss * para_lossweight) + (sts_loss * sts_lossweight)
-            # loss = (sst_loss + para_loss + sts_loss) / 3
+            # loss = (sst_loss * sst_lossweight) + (para_loss * para_lossweight) + (sts_loss * sts_lossweight)
+            loss = (sst_loss + para_loss + sts_loss) / 3
             loss = loss.type(torch.cuda.FloatTensor)
             loss.backward()
             optimizer.step()
@@ -377,8 +388,8 @@ def train_multitask(tune_config):
         train_loss = train_loss / (num_batches)
 
         # training sets evaluation: 
-        print("\nTRAINING SETS EVALUATIONS...")
         """ NOTE TO SELF: UNCOMMENT FOR SINGLETON RUNS """
+        print("\nTRAINING SETS EVALUATIONS...")
         (train_para_accuracy, _, _, train_sentiment_accuracy, _, _, train_sts_corr, _, _) = \
             model_eval_train_multitask(sst_train_dataloader, para_train_dataloader, sts_train_dataloader, model, device)
         
@@ -484,7 +495,7 @@ def tune_train(args):
     config = {
         "connected": tune.grid_search([
             # ["S", "S", "S"],
-            #["I", "S", "S"],
+            # ["I", "S", "S"],
             # ["I", "I", "S"],
             # ["I", "I", "I"],
             # ["I", "S", "I"],
@@ -492,19 +503,17 @@ def tune_train(args):
             # ["S", "I", "I"],
             # ["S", "S", "I"], 
             [0, "I", "S", "S"],
-            [1, "I", "S", "S"],
-            [2, "I", "S", "S"],
-            [0, "S", "S", "I"],
-            [1, "S", "S", "I"],
-            [2, "S", "S", "I"],
-            [0, "S", "I", "S"],
-            [1, "S", "I", "S"],
-            [2, "S", "I", "S"],
-
+            # [1, "I", "S", "S"],
+            # [2, "I", "S", "S"],
+            # [0, "S", "S", "I"],
+            # [1, "S", "S", "I"],
+            # [2, "S", "S", "I"],
+            # [0, "S", "I", "S"],
+            # [1, "S", "I", "S"],
+            # [2, "S", "I", "S"],
         ]),
 
         "subsets": True, 
-        
         
         "lossweights" : tune.grid_search([
             [0.33, 0.33, 0.33], # default // no changes val. (order - para, sst, sts)
@@ -515,8 +524,11 @@ def tune_train(args):
         #     # [0.25, 0.50, 0.25], # and this one
         #     # [0.25, 0.25, 0.50]
         ]), 
-        "lr" : 8.56487702692805E-06,
+        
+        "lr" : 1e-05,
+        
         # "lr" : tune.loguniform(1e-1, 1e-7, base=10),
+        
         "args": args,                              
     }
     # tuner = tune.Tuner(train_multitask, param_space=config)
